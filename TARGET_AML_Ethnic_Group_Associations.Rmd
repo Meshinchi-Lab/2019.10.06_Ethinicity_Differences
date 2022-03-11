@@ -1,0 +1,226 @@
+---
+title: "Association of Fusions/Translocations in Ethnic Groups"
+author: "Jenny Smith"
+date: "October 11, 2019"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir = file.path("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/Clinical/analysis/2019.10.06_Ethinicity_Differences/"))
+options(stringsAsFactors = FALSE)
+
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(DeGSEA)
+library(purrr)
+library(gridExtra)
+library(compareGroups)
+getwd()
+```
+
+
+
+#ClinData
+
+```{r}
+cats <- read.csv("TARGET_AML_0531_1031_merged_CDEs_9.4.19_added_ethnicity_class.csv") %>% 
+  select(Reg.,Ethnic.Classification) 
+
+head(cats)
+dim(cats)
+```
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.4.19.csv")) %>% 
+  left_join(., cats, by="Reg.") %>% 
+  filter(Ethnic.Classification != "Unknown") %>% 
+  mutate_at(vars(Ethnic.Classification), ~gsub(" ","_",.)) #%>% 
+  # bind_cols(., createMultiCols(.$Ethnic.Classification,suffix=""))
+
+
+head(merged[,1:5])
+dim(merged) # 2108  145
+table(merged$Ethnic.Classification, useNA = 'ifany')
+```
+
+
+
+#Clean Data 
+
+```{r}
+#Select Columns to investigate
+dat <- merged %>% 
+  select(-Race,-Ethnicity,-Rare.Fusions,-FAB_or_WHO.Classification,-Cyto.vs..Seq, -GATA2,-CSF3R,
+         -Cytogenetic.Category.1, -Cytogenetic.Category.2, -Rare.Fusions, -SNVs,
+         -Risk.group.classification..by.protocol.1031, -RGA, -Fusion.Risk,-Progression.Free.Survival,
+         -Complexity,-Additional.Fusions.CNV,-FLT3.PM,-CNS.disease.at.on.study,-ETS.SNVs,
+         -ISCN,-Reason,-Cytogenetic.Code.Other,-c(Year.of.Diagnosis:Year.of.Last.Follow.Up),
+         -c(Was.protocol.specified.definition.of.CNS.disease.met...if.blasts.present.and.spinal.tap.was.traumatic.:Specimen.time.point), 
+         -Comments,-Was.sample.sent.for.RBD.sequencing,-Comment, 
+         -c(Bone.Marrow.Site.of.Relapse.Induction.Failure:Other.Site.of.Relapse.Induction.Failure)) %>% 
+  #Clean and Create Binary Fusion Columns 
+  mutate_at(vars(Primary.Fusion.CNV), ~gsub("None","none",.)) %>%
+  mutate_at(vars(Primary.Fusion.CNV), ~ifelse(.=="No cyto/no RNA seq","Unknown",.)) %>%
+  mutate_at(vars(Primary.Fusion.CNV), ~ifelse(.=="Monosomy 7","monosomy7",.)) %>%
+  mutate_at(vars(Primary.Fusion.CNV), ~gsub(" ","_",.)) %>%
+  bind_cols(., createMultiCols(.$Primary.Fusion.CNV, suffix = "") %>%
+              bind_cols() %>%
+              select_if(~sum(grepl("Yes",.))>= 3) %>%
+              select(-NUP98.NSD1,-DEK.NUP214,-FUS.ERG, -CBFA2T3.GLIS2,-del5q,
+                     -RBM15.MKL1,-NUP98.KDM5A,-NPM1.MLF1,-monosomy7,-Unknown,-none)) %>%
+  mutate_at(vars(KMT2A.MLLT3:MLLT10.PICALM), ~ifelse(ScreenedForFusion == "No", NA, .)) %>%
+  mutate(Normal_Cyto=case_when(
+    Primary.Cytogenetic.Code=="Normal" ~ "Yes",
+    Primary.Cytogenetic.Code == "Unknown" ~ "Unknown", 
+    TRUE ~ "No")) %>%
+  mutate_if(is.character, ~gsub("Not done|^$", "Unknown", .)) %>%
+  mutate_at(vars(CR.status.at.end.of.course.1:CR.status.at.end.of.course.2),
+            ~ifelse(!grepl("CR",.), "Unknown",.)) %>%
+  mutate_if(is.character, ~ifelse(.=="Unknown", NA, .)) 
+  
+
+#base R for survival data. These have to be the explanatory variable to calculate HR. Skip for now
+#Example formula: time_to_death ~ Ethnic.Classification
+# dat$time_to_death<- with(dat, Surv(OS.time..days.,OS.ID))
+# dat$time_to_event <- with(dat, Surv(EFS.time..days.,Event.ID))
+
+#tidy R to remove last unnecessary columns
+dat <- dat %>%
+  select(-OS.time..days.,-OS.ID,
+         -EFS.time..days.,-Event.ID,
+         -OS.event.ID,-EFS.event.type.ID,
+         -Primary.Fusion.CNV, -ScreenedForFusion,-Primary.Cytogenetic.Code, 
+         -KMT2A.NUP98, KMT2A.AFF1)
+
+dim(dat) #2108  92
+# colnames(dat)
+```
+
+```{r}
+#Check factor levels
+# rev(map(select_if(dat,is.character)[,-c(1:2)], table, useNA='ifany'))
+```
+
+
+#Black and African American
+
+```{r warning=FALSE}
+BvsC.comp <- compareGroups(Ethnic.Classification ~ .,
+                      data=filter(dat,grepl("Black_or_African_American|Caucasian",
+                                            Ethnic.Classification)) %>% 
+                            mutate(Ethnic.Classification=factor(Ethnic.Classification,
+                                                                levels=c("Caucasian",
+                                                                         "Black_or_African_American"))) %>%
+                            select(-USI,-Reg.),
+                      method=4,Q1=0,Q3=1,
+                      timemax=1826.25,min.dis=5,
+                      ref=1, #first factor level
+                      ref.no="No",fact.ratio=1,ref.y=1,
+                      p.corrected=TRUE,
+                      compute.ratio=TRUE,
+                      include.miss=FALSE,
+                      byrow=FALSE)
+```
+
+
+```{r}
+pdf("Black_AA_Comparisons.pdf",onefile = TRUE, height = 10, width = 10)
+par(mfrow=c(3,3))
+plot(BvsC.comp, bivar = T)
+dev.off()
+```
+
+```{r}
+BvsC.tab <- createTable(BvsC.comp,show.ratio=FALSE,
+                      digits.ratio=2)
+# BvsC.tab
+# export2csv(x = BvsC.tab, file="Black_AA_Clinical_Characteristics.csv")
+```
+
+
+#Hispanic 
+
+```{r warning=FALSE}
+HvsC.comp <- compareGroups(Ethnic.Classification ~ .,
+                      data=filter(dat,grepl("Hispanic|Caucasian",
+                                            Ethnic.Classification)) %>% 
+                            mutate(Ethnic.Classification=factor(Ethnic.Classification,
+                                                                levels=c("Caucasian", "Hispanic"))) %>%
+                            select(-USI,-Reg.),
+                      method=4,Q1=0,Q3=1,
+                      timemax=1826.25,min.dis=5,
+                      ref=1, #first factor level
+                      ref.no="No",fact.ratio=1,ref.y=1,
+                      p.corrected=TRUE,
+                      compute.ratio=TRUE,
+                      include.miss=FALSE,
+                      byrow=FALSE)
+```
+
+
+```{r}
+pdf("Hispanic_Comparisons.pdf",onefile = TRUE, height = 10, width = 10)
+par(mfrow=c(3,3))
+plot(HvsC.comp, bivar = T)
+dev.off()
+```
+
+```{r}
+HvsC.tab <- createTable(HvsC.comp,show.ratio=FALSE,
+                      digits.ratio=2)
+export2csv(x = HvsC.tab, file="Hispanic_Clinical_Characteristics.csv")
+```
+
+
+#Asian
+
+```{r warning=FALSE}
+AvsC.comp <- compareGroups(Ethnic.Classification ~ .,
+                      data=filter(dat,grepl("Asian|Caucasian",
+                                            Ethnic.Classification)) %>% 
+                            mutate(Ethnic.Classification=factor(Ethnic.Classification,
+                                                                levels=c("Caucasian", "Asian"))) %>%
+                            select(-USI,-Reg.),
+                      method=4,Q1=0,Q3=1,
+                      timemax=1826.25,min.dis=5,
+                      ref=1, #first factor level
+                      ref.no="No",fact.ratio=1,ref.y=1,
+                      p.corrected=TRUE,
+                      compute.ratio=TRUE,
+                      include.miss=FALSE,
+                      byrow=FALSE)
+```
+
+
+```{r}
+pdf("Asian_Comparisons.pdf",onefile = TRUE, height = 10, width = 10)
+par(mfrow=c(3,3))
+plot(AvsC.comp, bivar = T)
+dev.off()
+```
+
+```{r}
+AvsC.tab <- createTable(AvsC.comp,show.ratio=FALSE,
+                      digits.ratio=2)
+
+export2csv(x = AvsC.tab, file="Asian_Clinical_Characteristics.csv")
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
